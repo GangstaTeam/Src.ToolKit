@@ -1,0 +1,88 @@
+name: Build ToolKit
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - '**.md'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Create SDK token
+      id: sdk-token
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ secrets.GANGSTA_APP_ID }}
+        private-key: ${{ secrets.GANGSTA_APP_PRIVATE_KEY }}
+        owner: GangstaTeam
+        repositories: SDK
+        permission-contents: read
+
+    - name: Clone SDK
+      run: git clone https://x-access-token:${{ steps.sdk-token.outputs.token }}@github.com/GangstaTeam/SDK.git SDK
+      shell: pwsh
+
+    - name: Build ToolKit
+      run: |
+        cmake -S . -B build -A x64
+        cmake --build build --config Release --target ToolKit
+      shell: pwsh
+
+    - name: Build ToolKitLink
+      run: |
+        cmake -S gamelink -B build-gamelink -A Win32 "-DSCARFACE_SDK_ROOT=$env:GITHUB_WORKSPACE"
+        cmake --build build-gamelink --config Release
+      shell: pwsh
+
+    - name: Package
+      run: |
+        New-Item -ItemType Directory -Force -Path Package\plugins | Out-Null
+        Copy-Item build\bin\Release\ToolKit.exe Package\
+        Copy-Item build\bin\Release\schema Package\schema -Recurse
+        Copy-Item build-gamelink\Release\ToolKitLink.asi Package\plugins\
+        Compress-Archive -Path Package\* -DestinationPath ToolKit.zip -Force
+      shell: pwsh
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ToolKit
+        path: ToolKit.zip
+
+    - name: Create release token
+      id: release-token
+      if: github.event_name != 'pull_request'
+      uses: actions/create-github-app-token@v3
+      with:
+        app-id: ${{ secrets.GANGSTA_APP_ID }}
+        private-key: ${{ secrets.GANGSTA_APP_PRIVATE_KEY }}
+        owner: GangstaTeam
+        repositories: ToolKit
+        permission-contents: write
+
+    - name: Publish Release to Public Repo
+      if: github.event_name != 'pull_request'
+      env:
+        GH_TOKEN: ${{ steps.release-token.outputs.token }}
+      run: |
+        gh release view continuous -R GangstaTeam/ToolKit *> $null
+        if ($LASTEXITCODE -eq 0) {
+          gh release delete continuous -R GangstaTeam/ToolKit --cleanup-tag -y
+        }
+        gh release create continuous ToolKit.zip -R GangstaTeam/ToolKit --title "Continuous build" --notes "Continuous build" --latest
+      shell: pwsh
