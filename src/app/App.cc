@@ -195,6 +195,12 @@ bool App::Init()
 
 void App::Shutdown()
 {
+    if (ImGui::GetCurrentContext() && ImGui::GetIO().IniFilename)
+    {
+        ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
+        ImGui::GetIO().IniFilename = nullptr;
+    }
+
     m_nis.reset();
     m_game.reset();
     m_frontend.reset();
