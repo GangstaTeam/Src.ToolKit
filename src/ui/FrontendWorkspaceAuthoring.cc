@@ -239,6 +239,25 @@ void FrontendWorkspace::DeleteSelection()
         return;
     }
 
+    std::vector<fe::Node*> nodes = SelectedNodes();
+
+    if (nodes.size() > 1)
+    {
+        m_extraSelection.clear();
+        m_document.Edit(
+            [&](Chunk&)
+            {
+                for (fe::Node* node : nodes)
+                {
+                    if (Chunk* parent = node->chunk->Parent())
+                    {
+                        parent->RemoveChild(node->chunk->IndexInParent());
+                    }
+                }
+            });
+        return;
+    }
+
     if (selected->type == fe::Type::Page && m_project.root)
     {
         Chunk* project = m_project.root->chunk;
@@ -629,12 +648,24 @@ void FrontendWorkspace::AlignSelection(int horizontal, int vertical)
     };
     int dx = offset(horizontal, m_selectionMin.x, m_selectionMax.x, 640.0f);
     int dy = offset(vertical, m_selectionMin.y, m_selectionMax.y, 448.0f);
-    Move(*node, dx, dy);
+    Move(SelectedNodes(), dx, dy);
 }
 
 void FrontendWorkspace::DrawAlignControls()
 {
-    ImGui::TextUnformatted("Align on page");
+    size_t count = SelectedNodes().size();
+
+    if (count > 1)
+    {
+        ImGui::Text("Align the %d selected as one block", static_cast<int>(count));
+    }
+    else
+    {
+        ImGui::TextUnformatted("Align on page");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(Ctrl+click to select several)");
+    }
+
     ImGui::BeginDisabled(!m_hasSelectionBounds);
     struct Button
     {

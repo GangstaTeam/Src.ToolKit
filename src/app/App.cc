@@ -67,7 +67,7 @@ bool App::Init()
     };
     m_window.onCloseRequest = [this]
     {
-        return ConfirmDiscard() && m_archive->ConfirmDiscard() && m_nis->ConfirmDiscard();
+        return RequestClose();
     };
 
     std::string error;
@@ -92,7 +92,7 @@ bool App::Init()
 
         if (m_document.HasPath() && m_document.Dirty() && inside(m_document.Path()))
         {
-            SaveDocument();
+            WriteDocument();
         }
 
         if (m_nis->Dirty() && !m_nis->Path().empty() && inside(m_nis->Path()))
@@ -103,6 +103,10 @@ bool App::Init()
     archiveActions.error = [this](const std::string& message)
     {
         ShowError(message);
+    };
+    archiveActions.saved = [this](const std::string& message)
+    {
+        Toast(message);
     };
     m_archive = std::make_unique<ArchiveWorkspace>(m_window.Handle(), m_schema, std::move(archiveActions));
     NisActions nisActions;
@@ -236,6 +240,18 @@ int App::Run(const std::vector<std::filesystem::path>& startupFiles)
 
 void App::Frame()
 {
+    m_archive->Tick();
+
+    if (m_closePending && !m_archive->Busy())
+    {
+        m_closePending = false;
+
+        if (!m_archive->Dirty())
+        {
+            PostMessageW(m_window.Handle(), WM_CLOSE, 0, 0);
+        }
+    }
+
     UpdateTitle();
     m_imgui.BeginFrame();
     m_menu->Draw();
@@ -270,6 +286,7 @@ void App::Frame()
         m_archive->Draw();
     }
 
+    DrawToast();
     DrawErrorPopup();
 
     if (m_device.BeginFrame())
@@ -281,6 +298,64 @@ void App::Frame()
     {
         ImGui::EndFrame();
     }
+}
+
+void App::Toast(const std::string& message)
+{
+    m_toast = message;
+    m_toastUntil = ImGui::GetTime() + 2.5;
+}
+
+void App::DrawToast()
+{
+    if (m_toast.empty() || ImGui::GetTime() > m_toastUntil)
+    {
+        return;
+    }
+
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 corner(viewport->WorkPos.x + viewport->WorkSize.x - 16.0f, viewport->WorkPos.y + viewport->WorkSize.y - 16.0f);
+    ImGui::SetNextWindowPos(corner, ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+    ImGui::SetNextWindowViewport(viewport->ID);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoDocking;
+
+    if (ImGui::Begin("##toast", nullptr, flags))
+    {
+        ImGui::TextUnformatted(m_toast.c_str());
+    }
+
+    ImGui::End();
+}
+
+bool App::RequestClose()
+{
+    if (m_archive->Busy())
+    {
+        m_closePending = true;
+        Toast("Saving archive, ToolKit closes when it is done");
+        return false;
+    }
+
+    if (!ConfirmDiscard())
+    {
+        return false;
+    }
+
+    if (!m_archive->ConfirmDiscard())
+    {
+        if (m_archive->Busy())
+        {
+            m_closePending = true;
+            Toast("Saving archive, ToolKit closes when it is done");
+        }
+
+        return false;
+    }
+
+    return m_nis->ConfirmDiscard();
 }
 
 void App::DrawWorkspaceBar()
@@ -424,22 +499,34 @@ void App::DrawErrorPopup()
     ImGui::EndPopup();
 }
 
+std::filesystem::path App::DisplayPath(const std::filesystem::path& path) const
+{
+    if (m_archive->OwnsWorkingFile(path))
+    {
+        return m_archive->Path().wstring() + L" > " + m_archive->WorkingEntry(path).wstring();
+    }
+
+    return path;
+}
+
 void App::UpdateTitle()
 {
     std::wstring name;
 
     if (m_workspace == Workspace::Archive)
     {
-        std::string title = m_archive->Title();
-        name = std::filesystem::u8path(title).wstring();
+        name = m_archive->HasArchive() && !m_archive->Path().empty()
+            ? m_archive->Path().wstring() + (m_archive->Dirty() ? L" *" : L"")
+            : std::filesystem::u8path(m_archive->Title()).wstring();
     }
     else if (m_workspace == Workspace::Nis)
     {
-        name = std::filesystem::u8path(m_nis->Title()).wstring();
+        name = m_nis->Path().empty() ? std::filesystem::u8path(m_nis->Title()).wstring()
+                                     : m_nis->Path().wstring() + (m_nis->Dirty() ? L" *" : L"");
     }
     else
     {
-        name = (m_document.HasPath() ? m_document.Path().filename().wstring() : L"untitled.p3d") +
+        name = (m_document.HasPath() ? DisplayPath(m_document.Path()).wstring() : L"untitled.p3d") +
             (m_document.Dirty() ? L" *" : L"");
     }
 

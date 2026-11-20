@@ -11,6 +11,8 @@
 #include <imgui.h>
 #include <shellapi.h>
 
+#include <cmath>
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -167,6 +169,19 @@ FileKind KindOf(const std::string& name)
     }
 
     return {icon::Document, "File", false};
+}
+
+bool IsAudio(const std::string& name)
+{
+    return KindOf(name).icon == icon::Audio;
+}
+
+std::string FormatClock(double seconds)
+{
+    char text[32];
+    int minutes = static_cast<int>(seconds / 60.0);
+    std::snprintf(text, sizeof(text), "%d:%04.1f", minutes, seconds - minutes * 60.0);
+    return text;
 }
 
 bool LooksLikeText(const Bytes& bytes)
@@ -363,6 +378,9 @@ bool ArchiveWorkspace::Reload(const std::filesystem::path& path, std::string& er
     m_alignment = m_archive.Alignment();
     m_sources = SourcesFromArchive(m_archive);
     m_dirty = false;
+    m_audio.Clear();
+    m_audioInfoHash = 0;
+    ScanAudioNames();
     m_treeDirty = m_rowsDirty = true;
     ++m_previewStamp;
 
@@ -437,6 +455,12 @@ void ArchiveWorkspace::SaveTo(const std::filesystem::path& target)
             if (!Reload(target, error))
             {
                 m_actions.error(error);
+                return;
+            }
+
+            if (m_actions.saved)
+            {
+                m_actions.saved("Saved " + target.u8string());
             }
         });
 }
@@ -945,7 +969,9 @@ void ArchiveWorkspace::RebuildRows()
                 m_rows.push_back({nullptr, i});
             }
         }
-        else if (IsUnder(name, m_folder) && Lower(name).find(filter) != std::string::npos)
+        else if (IsUnder(name, m_folder) &&
+            (Lower(name).find(filter) != std::string::npos ||
+                Lower(AudioName(m_sources[i])).find(filter) != std::string::npos))
         {
             m_rows.push_back({nullptr, i});
         }
@@ -1022,6 +1048,11 @@ void ArchiveWorkspace::ActivateRow(const Row& row)
     if (row.folder)
     {
         return EnterFolder(row.folder->path);
+    }
+
+    if (IsAudio(m_sources[row.source].name))
+    {
+        return PlayAudio(row.source, true);
     }
 
     EditInToolKit(row.source);
@@ -1108,12 +1139,35 @@ std::vector<size_t> ArchiveWorkspace::SelectedSources() const
     return result;
 }
 
-void ArchiveWorkspace::Draw()
+void ArchiveWorkspace::Tick()
 {
+    m_audio.Tick();
+
     if (m_jobFinished && m_job.joinable())
     {
         FinishJob();
     }
+}
+
+bool ArchiveWorkspace::OwnsWorkingFile(const std::filesystem::path& path) const
+{
+    if (!m_hasArchive || m_path.empty())
+    {
+        return false;
+    }
+
+    std::filesystem::path relative = path.lexically_relative(WorkDirectory());
+    return !relative.empty() && *relative.begin() != L"..";
+}
+
+std::filesystem::path ArchiveWorkspace::WorkingEntry(const std::filesystem::path& path) const
+{
+    return path.lexically_relative(WorkDirectory());
+}
+
+void ArchiveWorkspace::Draw()
+{
+    Tick();
 
     if (!Busy() && ImGui::GetTime() - m_lastWorkingCheck > 1.0)
     {
@@ -1509,6 +1563,17 @@ void ArchiveWorkspace::DrawFileTable()
                 ImGui::EndPopup();
             }
 
+            if (!row.folder)
+            {
+                std::string original = AudioName(m_sources[row.source]);
+
+                if (!original.empty())
+                {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", LeafOf(original).c_str());
+                }
+            }
+
             ImGui::TableNextColumn();
 
             if (row.folder)
@@ -1598,6 +1663,11 @@ void ArchiveWorkspace::DrawRowMenu(const Row& row)
     {
         bool model = KindOf(m_sources[row.source].name).icon == icon::Model;
 
+        if (IsAudio(m_sources[row.source].name) && ImGui::MenuItem("Play", "Space", false, single))
+        {
+            PlayAudio(row.source, true);
+        }
+
         if (ImGui::MenuItem(model ? "Edit in Pure3D" : "Open with default program", "Enter", false, single))
         {
             EditInToolKit(row.source);
@@ -1663,6 +1733,23 @@ void ArchiveWorkspace::HandleFileKeys()
             else
             {
                 m_selected.insert(CementHash(m_sources[row.source].name));
+            }
+        }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Space, false))
+    {
+        std::vector<size_t> selected = SelectedSources();
+
+        if (selected.size() == 1 && IsAudio(m_sources[selected[0]].name))
+        {
+            if (m_audio.Key() == CementHash(m_sources[selected[0]].name))
+            {
+                m_audio.Toggle();
+            }
+            else
+            {
+                PlayAudio(selected[0], true);
             }
         }
     }
@@ -1749,6 +1836,11 @@ bool ArchiveWorkspace::LoadPreview(const CementSource& source)
 
 void ArchiveWorkspace::DrawPreview(const CementSource& source)
 {
+    if (IsAudio(source.name))
+    {
+        return DrawAudio(source);
+    }
+
     uint32_t hash = CementHash(source.name);
 
     if (hash != m_previewHash || m_previewLoadedStamp != m_previewStamp)
@@ -1848,6 +1940,231 @@ void ArchiveWorkspace::DrawPreview(const CementSource& source)
     ImGui::EndChild();
 }
 
+void ArchiveWorkspace::ScanAudioNames()
+{
+    m_audioNames.clear();
+    RawFile file(m_path, RawFile::Mode::Read);
+
+    if (!file.IsOpen())
+    {
+        return;
+    }
+
+    Bytes header;
+
+    for (const CementSource& source : m_sources)
+    {
+        if (source.kind != CementSource::Kind::ArchiveSlice || Extension(source.name) != ".rsd")
+        {
+            continue;
+        }
+
+        header.resize(std::min<size_t>(source.size, kRsdNameOffset + kRsdNameBytes));
+        AudioInfo info;
+
+        if (file.Seek(source.offset) && file.Read(header.data(), header.size()) && ReadAudioInfo(header, info) &&
+            !info.originalName.empty())
+        {
+            m_audioNames[CementHash(source.name)] = info.originalName;
+        }
+    }
+}
+
+std::string ArchiveWorkspace::AudioName(const CementSource& source) const
+{
+    auto it = m_audioNames.find(CementHash(source.name));
+    return it == m_audioNames.end() ? std::string() : it->second;
+}
+
+void ArchiveWorkspace::PlayAudio(size_t index, bool autoPlay)
+{
+    const CementSource& source = m_sources[index];
+    uint32_t hash = CementHash(source.name);
+
+    if (m_audio.Key() == hash && (m_audio.Ready() || m_audio.Decoding()))
+    {
+        if (autoPlay)
+        {
+            m_audio.Stop();
+            m_audio.Play();
+        }
+
+        return;
+    }
+
+    if (source.size > kAudioLoadLimit)
+    {
+        return m_actions.error(source.name + " is too large to play here.");
+    }
+
+    Bytes bytes;
+    std::string error;
+
+    if (!ReadSourceBytes(source, kAudioLoadLimit, bytes, error))
+    {
+        return m_actions.error(error);
+    }
+
+    m_audio.Load(hash, std::move(bytes), autoPlay);
+}
+
+void ArchiveWorkspace::DrawAudio(const CementSource& source)
+{
+    uint32_t hash = CementHash(source.name);
+
+    if (m_audioInfoHash != hash)
+    {
+        Bytes header;
+        std::string error;
+        m_audioInfo = AudioInfo();
+
+        if (ReadSourceBytes(source, kAudioHeaderBytes, header, error))
+        {
+            ReadAudioInfo(header, m_audioInfo);
+        }
+
+        m_audioInfoHash = hash;
+
+        if (m_audio.Key() != hash)
+        {
+            size_t index = static_cast<size_t>(&source - m_sources.data());
+            PlayAudio(index, false);
+        }
+    }
+
+    ImGui::SeparatorText("Player");
+
+    if (!m_audioInfo.codec.empty())
+    {
+        std::string format = m_audioInfo.codec;
+
+        if (m_audioInfo.container != "Ogg" && m_audioInfo.container != m_audioInfo.codec)
+        {
+            format += " in " + m_audioInfo.container;
+        }
+
+        ImGui::TextDisabled("%s, %u ch, %u Hz", format.c_str(), m_audioInfo.channels, m_audioInfo.sampleRate);
+    }
+
+    if (m_audio.Key() != hash)
+    {
+        return;
+    }
+
+    if (m_audio.Decoding())
+    {
+        ImGui::TextDisabled("Decoding...");
+        return;
+    }
+
+    if (!m_audio.Error().empty())
+    {
+        ImGui::TextWrapped("%s", m_audio.Error().c_str());
+        return;
+    }
+
+    if (!m_audio.Ready())
+    {
+        return;
+    }
+
+    bool playing = m_audio.Playing();
+    ImVec2 button(ImGui::GetFrameHeight() * 1.6f, 0);
+
+    if (ImGui::Button(playing ? icon::Pause : icon::Play, button))
+    {
+        m_audio.Toggle();
+    }
+
+    ImGui::SetItemTooltip(playing ? "Pause (Space)" : "Play (Space)");
+    ImGui::SameLine();
+
+    if (ImGui::Button(icon::Stop, button))
+    {
+        m_audio.Stop();
+    }
+
+    ImGui::SetItemTooltip("Stop");
+    ImGui::SameLine();
+    bool loop = m_audio.Loop();
+
+    if (ImGui::Checkbox("Loop", &loop))
+    {
+        m_audio.SetLoop(loop);
+    }
+
+    ImGui::SameLine();
+    ImGui::Text("%s / %s", FormatClock(m_audio.Position()).c_str(), FormatClock(m_audio.Duration()).c_str());
+
+    float volume = m_audio.Volume() * 100.0f;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+
+    if (ImGui::SliderFloat("##volume", &volume, 0.0f, 100.0f, "Volume %.0f%%"))
+    {
+        m_audio.SetVolume(volume / 100.0f);
+    }
+
+    DrawWaveform();
+}
+
+void ArchiveWorkspace::DrawWaveform()
+{
+    const std::vector<float>& peaks = m_audio.Peaks();
+    float width = ImGui::GetContentRegionAvail().x;
+    float height = std::clamp(ImGui::GetContentRegionAvail().y, 60.0f, 140.0f);
+
+    if (peaks.empty() || width < 8.0f)
+    {
+        return;
+    }
+
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 end(origin.x + width, origin.y + height);
+    ImGui::InvisibleButton("waveform", ImVec2(width, height));
+    double duration = m_audio.Duration();
+    float mouse = std::clamp((ImGui::GetIO().MousePos.x - origin.x) / width, 0.0f, 1.0f);
+
+    if (ImGui::IsItemActive() && duration > 0.0)
+    {
+        m_audio.Seek(mouse * duration);
+    }
+
+    if (ImGui::IsItemHovered() && duration > 0.0)
+    {
+        ImGui::SetTooltip("%s", FormatClock(mouse * duration).c_str());
+    }
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(origin, end, ImGui::GetColorU32(ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
+
+    float played = duration > 0.0 ? static_cast<float>(m_audio.Position() / duration) : 0.0f;
+    float middle = origin.y + height * 0.5f;
+    float half = height * 0.5f - 3.0f;
+    int columns = std::max(1, static_cast<int>(width / 2.0f));
+    ImU32 done = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+    ImU32 rest = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+
+    for (int column = 0; column < columns; ++column)
+    {
+        size_t from = static_cast<size_t>(column) * peaks.size() / columns;
+        size_t to = std::max(from + 1, static_cast<size_t>(column + 1) * peaks.size() / columns);
+        float peak = 0.0f;
+
+        for (size_t i = from; i < to && i < peaks.size(); ++i)
+        {
+            peak = std::max(peak, peaks[i]);
+        }
+
+        float x = origin.x + (column + 0.5f) * width / columns;
+        float extent = std::max(1.0f, peak * half);
+        bool past = (column + 0.5f) / columns <= played;
+        draw->AddLine(ImVec2(x, middle - extent), ImVec2(x, middle + extent), past ? done : rest, 1.0f);
+    }
+
+    float head = origin.x + played * width;
+    draw->AddLine(ImVec2(head, origin.y), ImVec2(head, end.y), ImGui::GetColorU32(ImGuiCol_Text), 1.5f);
+}
+
 void ArchiveWorkspace::DrawDetails()
 {
     if (!ImGui::Begin(DetailsWindow()))
@@ -1887,6 +2204,12 @@ void ArchiveWorkspace::DrawDetails()
         if (beginProperties())
         {
             property("Folder", ParentOf(source.name).empty() ? std::string("(root)") : ParentOf(source.name));
+
+            if (std::string original = AudioName(source); !original.empty())
+            {
+                property("Original", original);
+            }
+
             property("Type", kind.label);
             property("Size", FormatSize(source.size) + "  (" + std::to_string(source.size) + " bytes)");
             property("Modified", FormatTime(source.timestamp));

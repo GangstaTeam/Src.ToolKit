@@ -187,6 +187,19 @@ void App::SaveAs()
     SaveDocumentAs();
 }
 
+bool App::WriteDocument()
+{
+    std::string error;
+
+    if (!m_document.Save(error))
+    {
+        ShowError(error);
+        return false;
+    }
+
+    return true;
+}
+
 void App::SaveDocument()
 {
     if (!m_document.HasPath())
@@ -194,12 +207,19 @@ void App::SaveDocument()
         return SaveDocumentAs();
     }
 
-    std::string error;
-
-    if (!m_document.Save(error))
+    if (!WriteDocument())
     {
-        ShowError(error);
+        return;
     }
+
+    if (m_archive->OwnsWorkingFile(m_document.Path()) && !m_archive->Busy())
+    {
+        Toast("Saved " + DisplayPath(m_document.Path()).u8string() + ", writing the archive...");
+        m_archive->Save();
+        return;
+    }
+
+    Toast("Saved " + m_document.Path().u8string());
 }
 
 void App::SaveDocumentAs()
@@ -217,6 +237,7 @@ void App::SaveDocumentAs()
     if (m_document.SaveAs(*path, error))
     {
         m_recent.Add(*path);
+        Toast("Saved " + path->u8string());
     }
     else
     {

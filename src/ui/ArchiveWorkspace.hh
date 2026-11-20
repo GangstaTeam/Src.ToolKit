@@ -4,6 +4,7 @@
 #include "p3d/Schema.hh"
 #include "rcf/CementArchive.hh"
 #include "rcf/CementWriter.hh"
+#include "ui/AudioPlayer.hh"
 
 #include <windows.h>
 
@@ -26,6 +27,7 @@ enum EArchiveWorkspaceSize : size_t
     kPreviewLimit = 16u << 20,
     kTextPreviewLimit = 256u << 10,
     kHexPreviewBytes = 4096,
+    kAudioLoadLimit = 128u << 20,
 };
 
 struct ArchiveActions
@@ -33,6 +35,7 @@ struct ArchiveActions
     std::function<void(const std::filesystem::path&)> editFile;
     std::function<void(const std::filesystem::path& workDir)> flushEditor;
     std::function<void(const std::string&)> error;
+    std::function<void(const std::string&)> saved;
 };
 
 class ArchiveWorkspace
@@ -47,6 +50,10 @@ public:
     static const char* DetailsWindow() { return "Details"; }
 
     void Draw();
+    void Tick();
+    bool OwnsWorkingFile(const std::filesystem::path& path) const;
+    std::filesystem::path WorkingEntry(const std::filesystem::path& path) const;
+    const std::filesystem::path& Path() const { return m_path; }
     void Open(const std::filesystem::path& path);
     void OpenWithDialog();
     void New();
@@ -97,6 +104,8 @@ private:
     void DrawRowMenu(const Row& row);
     void DrawDetails();
     void DrawPreview(const CementSource& source);
+    void DrawAudio(const CementSource& source);
+    void DrawWaveform();
     void DrawJobPopup();
     void DrawEmpty();
     void HandleFileKeys();
@@ -119,6 +128,9 @@ private:
     void ApplyWorkingCopies();
     std::filesystem::path WorkDirectory() const;
     bool LoadPreview(const CementSource& source);
+    void ScanAudioNames();
+    std::string AudioName(const CementSource& source) const;
+    void PlayAudio(size_t index, bool autoPlay);
 
     void RunJob(std::string title,
         std::function<bool(const CementProgress&, std::string&)> work,
@@ -162,6 +174,11 @@ private:
     std::string m_previewText;
     std::vector<std::pair<uint32_t, size_t>> m_previewChunks;
     std::string m_previewError;
+
+    AudioPlayer m_audio;
+    std::map<uint32_t, std::string> m_audioNames;
+    uint32_t m_audioInfoHash = 0;
+    AudioInfo m_audioInfo;
 
     std::thread m_job;
     std::string m_jobTitle;

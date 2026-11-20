@@ -43,6 +43,7 @@ private:
     void DrawDockSpace();
     void DrawErrorPopup();
     void UpdateTitle();
+    std::filesystem::path DisplayPath(const std::filesystem::path& path) const;
 
     bool ConfirmDiscard();
     void NewFile();
@@ -56,7 +57,11 @@ private:
     void Save();
     void SaveAs();
     void SaveDocument();
+    bool WriteDocument();
     void SaveDocumentAs();
+    void Toast(const std::string& message);
+    void DrawToast();
+    bool RequestClose();
     void ShowError(const std::string& message);
 
     Window m_window;
@@ -80,6 +85,9 @@ private:
     std::unique_ptr<GameWorkspace> m_game;
     std::unique_ptr<NisWorkspace> m_nis;
     std::string m_error;
+    std::string m_toast;
+    double m_toastUntil = 0.0;
+    bool m_closePending = false;
     std::wstring m_title;
     bool m_running = true;
 };

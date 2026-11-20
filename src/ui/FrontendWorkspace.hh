@@ -103,7 +103,12 @@ private:
     fe::Node* NodeFor(const Chunk* chunk) const;
     fe::Node* PageOf(fe::Node* node) const;
     void Select(fe::Node* node);
-    void Move(fe::Node& node, int dx, int dy);
+    void SelectOnly(fe::Node* node);
+    void ToggleInSelection(fe::Node* node);
+    void SyncSelection();
+    std::vector<fe::Node*> SelectedNodes() const;
+    bool InSelection(const fe::Node* node) const;
+    void Move(const std::vector<fe::Node*>& roots, int dx, int dy);
     fe::Node* CurrentPage() const;
     Chunk* TargetLayer(size_t& index) const;
     void AddElement(std::unique_ptr<Chunk> chunk);
@@ -141,6 +146,9 @@ private:
     const fe::Node* m_page = nullptr;
     const fe::Node* m_screen = nullptr;
     std::set<const Chunk*> m_hidden;
+    std::vector<const Chunk*> m_extraSelection;
+    const Chunk* m_extraPrimary = nullptr;
+    uint64_t m_extraRevision = UINT64_MAX;
     const fe::Node* m_revealed = nullptr;
     bool m_revealPending = false;
 

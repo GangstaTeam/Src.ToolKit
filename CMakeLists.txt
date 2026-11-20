@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ToolKit LANGUAGES CXX)
+project(ToolKit LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,6 +33,12 @@ if(MSVC)
     target_compile_options(imgui PRIVATE /W0)
 endif()
 
+add_library(stb_vorbis STATIC ${CMAKE_SOURCE_DIR}/third_party/stb/stb_vorbis.c)
+target_include_directories(stb_vorbis PUBLIC ${CMAKE_SOURCE_DIR}/third_party)
+if(MSVC)
+    target_compile_options(stb_vorbis PRIVATE /W0)
+endif()
+
 set(TK_RIG_RENDER_SOURCES src/render/Math3d.cc src/render/ImageDecoder.cc src/render/ImageEncoder.cc)
 file(GLOB TK_RIG_SOURCES CONFIGURE_DEPENDS src/rig/*.cc)
 add_library(tk_rig STATIC ${TK_RIG_SOURCES} ${TK_RIG_RENDER_SOURCES})
@@ -42,7 +48,7 @@ file(GLOB TK_APP_SOURCES CONFIGURE_DEPENDS src/app/*.cc src/doc/*.cc src/ui/*.cc
 list(REMOVE_ITEM TK_APP_SOURCES ${CMAKE_SOURCE_DIR}/src/render/Math3d.cc ${CMAKE_SOURCE_DIR}/src/render/ImageDecoder.cc
      ${CMAKE_SOURCE_DIR}/src/render/ImageEncoder.cc)
 add_executable(ToolKit WIN32 ${TK_APP_SOURCES} res/toolkit.rc)
-target_link_libraries(ToolKit PRIVATE tk_rig tk_rcf tk_nis imgui d3d9 dwmapi comdlg32 shell32)
+target_link_libraries(ToolKit PRIVATE tk_rig tk_rcf tk_nis imgui stb_vorbis d3d9 dwmapi comdlg32 shell32 winmm)
 add_custom_command(TARGET ToolKit POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/schema $<TARGET_FILE_DIR:ToolKit>/schema)
 

@@ -358,6 +358,112 @@ void FrontendWorkspace::Select(fe::Node* node)
     m_revealPending = true;
 }
 
+void FrontendWorkspace::SelectOnly(fe::Node* node)
+{
+    m_extraSelection.clear();
+    Select(node);
+}
+
+void FrontendWorkspace::SyncSelection()
+{
+    if (m_document.Selection() != m_extraPrimary || m_document.Revision() != m_extraRevision)
+    {
+        m_extraSelection.clear();
+        m_extraPrimary = m_document.Selection();
+        m_extraRevision = m_document.Revision();
+    }
+}
+
+void FrontendWorkspace::ToggleInSelection(fe::Node* node)
+{
+    auto groupable = [](const fe::Node* n)
+    {
+        return n && (n->IsDrawable() || n->type == fe::Type::Layer || n->type == fe::Type::Group);
+    };
+    fe::Node* primary = NodeFor(m_document.Selection());
+
+    if (!groupable(node) || !groupable(primary))
+    {
+        return SelectOnly(node);
+    }
+
+    auto it = std::find(m_extraSelection.begin(), m_extraSelection.end(), node->chunk);
+
+    if (node == primary)
+    {
+        if (m_extraSelection.empty())
+        {
+            return SelectOnly(nullptr);
+        }
+
+        Chunk* next = const_cast<Chunk*>(m_extraSelection.front());
+        m_extraSelection.erase(m_extraSelection.begin());
+        m_document.Select(next);
+        m_revealed = NodeFor(next);
+    }
+    else if (it != m_extraSelection.end())
+    {
+        m_extraSelection.erase(it);
+    }
+    else
+    {
+        m_extraSelection.push_back(node->chunk);
+    }
+
+    m_extraPrimary = m_document.Selection();
+    m_extraRevision = m_document.Revision();
+}
+
+std::vector<fe::Node*> FrontendWorkspace::SelectedNodes() const
+{
+    std::vector<fe::Node*> nodes;
+
+    if (fe::Node* primary = NodeFor(m_document.Selection()))
+    {
+        nodes.push_back(primary);
+    }
+
+    for (const Chunk* chunk : m_extraSelection)
+    {
+        if (fe::Node* node = NodeFor(chunk))
+        {
+            nodes.push_back(node);
+        }
+    }
+
+    std::vector<fe::Node*> roots;
+
+    for (fe::Node* node : nodes)
+    {
+        bool nested = false;
+
+        for (fe::Node* other : nodes)
+        {
+            nested = nested || (other != node && IsUnder(node, other));
+        }
+
+        if (!nested && std::find(roots.begin(), roots.end(), node) == roots.end())
+        {
+            roots.push_back(node);
+        }
+    }
+
+    return roots;
+}
+
+bool FrontendWorkspace::InSelection(const fe::Node* node) const
+{
+    for (const fe::Node* selected : SelectedNodes())
+    {
+        if (IsUnder(node, selected))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void FrontendWorkspace::RevealSelection()
 {
     fe::Node* selected = NodeFor(m_document.Selection());
@@ -392,9 +498,9 @@ std::vector<const fe::Node*> FrontendWorkspace::ShownPages() const
     return pages;
 }
 
-void FrontendWorkspace::Move(fe::Node& node, int dx, int dy)
+void FrontendWorkspace::Move(const std::vector<fe::Node*>& roots, int dx, int dy)
 {
-    if (!dx && !dy)
+    if ((!dx && !dy) || roots.empty())
     {
         return;
     }
@@ -402,7 +508,7 @@ void FrontendWorkspace::Move(fe::Node& node, int dx, int dy)
     std::vector<fe::Node*> targets;
     std::function<void(fe::Node&)> collect = [&](fe::Node& n)
     {
-        if (n.IsDrawable())
+        if (n.IsDrawable() && std::find(targets.begin(), targets.end(), &n) == targets.end())
         {
             targets.push_back(&n);
         }
@@ -412,8 +518,14 @@ void FrontendWorkspace::Move(fe::Node& node, int dx, int dy)
             collect(*child);
         }
     };
-    collect(node);
-    Chunk* selected = node.chunk;
+
+    for (fe::Node* root : roots)
+    {
+        collect(*root);
+    }
+
+    Chunk* selected = m_document.Selection();
+    bool keepExtras = m_extraRevision == m_document.Revision();
     m_document.Edit(
         [&](Chunk&)
         {
@@ -473,11 +585,18 @@ void FrontendWorkspace::Move(fe::Node& node, int dx, int dy)
             }
         });
     m_document.Select(selected);
+
+    if (keepExtras)
+    {
+        m_extraPrimary = selected;
+        m_extraRevision = m_document.Revision();
+    }
 }
 
 void FrontendWorkspace::Draw()
 {
     Refresh();
+    SyncSelection();
     LoadGameResources();
     LoadUsedImages();
     RevealSelection();
@@ -603,7 +722,8 @@ void FrontendWorkspace::DrawNode(fe::Node& node)
         flags |= ImGuiTreeNodeFlags_Leaf;
     }
 
-    if (m_document.Selection() == node.chunk)
+    if (m_document.Selection() == node.chunk ||
+        std::find(m_extraSelection.begin(), m_extraSelection.end(), node.chunk) != m_extraSelection.end())
     {
         flags |= ImGuiTreeNodeFlags_Selected;
     }
@@ -630,7 +750,7 @@ void FrontendWorkspace::DrawNode(fe::Node& node)
 
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
     {
-        Select(&node);
+        ImGui::GetIO().KeyCtrl ? ToggleInSelection(&node) : SelectOnly(&node);
     }
 
     if (m_revealPending && m_revealed == &node && !ImGui::IsItemVisible())
@@ -942,7 +1062,19 @@ void FrontendWorkspace::DrawCanvas()
     ImGui::SameLine();
     ImGui::TextDisabled("|  %.0f%%", m_zoom * 100.0f);
 
-    if (selected)
+    size_t selectedCount = SelectedNodes().size();
+
+    if (selectedCount > 1)
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|  %d selected  (%.0f, %.0f  %.0fx%.0f)",
+            static_cast<int>(selectedCount),
+            m_selectionMin.x,
+            m_selectionMin.y,
+            m_selectionMax.x - m_selectionMin.x,
+            m_selectionMax.y - m_selectionMin.y);
+    }
+    else if (selected)
     {
         ImGui::SameLine();
         ImGui::TextDisabled("|  %s %s", fe::TypeName(selected->type), selected->name.c_str());
@@ -978,7 +1110,6 @@ void FrontendWorkspace::DrawItems(ImDrawList* list, const View& view, const std:
 {
     ImTextureID white = ImGui::GetIO().Fonts->TexID;
     ImVec2 whiteUv = ImGui::GetIO().Fonts->TexUvWhitePixel;
-    const fe::Node* selected = NodeFor(m_document.Selection());
 
     for (const fe::DrawItem& item : items)
     {
@@ -987,7 +1118,7 @@ void FrontendWorkspace::DrawItems(ImDrawList* list, const View& view, const std:
             continue;
         }
 
-        bool moving = m_dragging && selected && IsUnder(item.node, selected);
+        bool moving = m_dragging && InSelection(item.node);
         float ox = moving ? m_dragOffset.x : 0.0f, oy = moving ? m_dragOffset.y : 0.0f;
         list->PushTextureID(item.texture ? reinterpret_cast<ImTextureID>(item.texture) : white);
         int count = static_cast<int>(item.triangles.size());
@@ -1038,7 +1169,7 @@ void FrontendWorkspace::DrawOverlay(ImDrawList* list, const View& view, const st
             outline(item, kBoundsColour, 1.0f, 0, 0);
         }
 
-        if (item.node == m_hover && !(selected && IsUnder(item.node, selected)))
+        if (item.node == m_hover && !InSelection(item.node))
         {
             outline(item, kHover, 1.0f, 0, 0);
         }
@@ -1049,14 +1180,21 @@ void FrontendWorkspace::DrawOverlay(ImDrawList* list, const View& view, const st
         return;
     }
 
+    bool multiple = SelectedNodes().size() > 1;
     bool any = false;
     float minX = 0, minY = 0, maxX = 0, maxY = 0;
+    float dragX = m_dragging ? m_dragOffset.x : 0.0f, dragY = m_dragging ? m_dragOffset.y : 0.0f;
 
     for (const fe::DrawItem& item : items)
     {
-        if (!IsUnder(item.node, selected))
+        if (!InSelection(item.node))
         {
             continue;
+        }
+
+        if (multiple)
+        {
+            outline(item, kSelection, 1.0f, dragX, dragY);
         }
 
         if (!any)
@@ -1080,7 +1218,7 @@ void FrontendWorkspace::DrawOverlay(ImDrawList* list, const View& view, const st
     ImVec2 a = view.ToScreen(minX + ox, maxY + oy), b = view.ToScreen(maxX + ox, minY + oy);
     list->AddRect(ImVec2(a.x - 1, a.y - 1), ImVec2(b.x + 1, b.y + 1), kSelection, 0.0f, 0, 2.0f);
 
-    if (selected->IsDrawable() && selected->type != fe::Type::Polygon)
+    if (!multiple && selected->IsDrawable() && selected->type != fe::Type::Polygon)
     {
         ImVec2 anchor = view.ToScreen(selected->x + ox, selected->y + oy);
         list->AddCircleFilled(anchor, 3.5f, kSelection);
@@ -1113,14 +1251,20 @@ void FrontendWorkspace::HandleCanvasInput(const View& view, const std::vector<fe
 
     fe::Node* selected = NodeFor(m_document.Selection());
 
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && io.KeyCtrl)
+    {
+        if (m_hover)
+        {
+            ToggleInSelection(NodeFor(m_hover->chunk));
+        }
+
+        m_dragging = false;
+        return;
+    }
+
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
     {
-        bool insideSelection = false;
-
-        if (selected && m_hover && IsUnder(m_hover, selected))
-        {
-            insideSelection = true;
-        }
+        bool insideSelection = selected && m_hover && InSelection(m_hover);
 
         if (!insideSelection)
         {
@@ -1128,10 +1272,11 @@ void FrontendWorkspace::HandleCanvasInput(const View& view, const std::vector<fe
 
             if (picked)
             {
-                Select(picked);
+                SelectOnly(picked);
             }
             else if (!ShownPages().empty())
             {
+                m_extraSelection.clear();
                 m_document.Select(nullptr);
             }
 
@@ -1155,7 +1300,7 @@ void FrontendWorkspace::HandleCanvasInput(const View& view, const std::vector<fe
 
             if (selected && (m_dragOffset.x != 0 || m_dragOffset.y != 0))
             {
-                Move(*selected, static_cast<int>(m_dragOffset.x), static_cast<int>(m_dragOffset.y));
+                Move(SelectedNodes(), static_cast<int>(m_dragOffset.x), static_cast<int>(m_dragOffset.y));
             }
 
             m_dragOffset = ImVec2(0, 0);
@@ -1178,7 +1323,7 @@ void FrontendWorkspace::HandleCanvasInput(const View& view, const std::vector<fe
             (ImGui::IsKeyPressed(ImGuiKey_UpArrow) ? step : 0) - (ImGui::IsKeyPressed(ImGuiKey_DownArrow) ? step : 0);
         if (dx || dy)
         {
-            Move(*selected, dx, dy);
+            Move(SelectedNodes(), dx, dy);
         }
     }
 }
